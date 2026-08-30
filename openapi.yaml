@@ -1,0 +1,145 @@
+openapi: 3.0.3
+info:
+  title: SNECB Student Verification
+  description: Verify publicly available SNECB examination results.
+  version: 1.0.0
+servers:
+  - url: https://YOUR-RENDER-SERVICE.onrender.com
+paths:
+  /verify:
+    get:
+      operationId: verifyStudent
+      summary: Verify one SNECB student
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: student_id
+          in: query
+          required: true
+          schema:
+            type: string
+          example: A25S075/001
+        - name: level
+          in: query
+          required: false
+          schema:
+            type: string
+            default: ""
+      responses:
+        "200":
+          description: Student verification result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StudentResult"
+        "401":
+          description: Invalid API authentication
+        "429":
+          description: SNECB rate limit reached
+        "502":
+          description: SNECB service error
+  /scan:
+    get:
+      operationId: scanStudentNumbers
+      summary: Scan a controlled range of SNECB IDs
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: prefix
+          in: query
+          required: false
+          schema:
+            type: string
+            default: A25S
+        - name: start
+          in: query
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+        - name: end
+          in: query
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+        - name: suffix
+          in: query
+          required: false
+          schema:
+            type: string
+            default: "/001"
+        - name: level
+          in: query
+          required: false
+          schema:
+            type: string
+            default: ""
+      responses:
+        "200":
+          description: Scan results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanResult"
+        "400":
+          description: Invalid scan range
+        "401":
+          description: Invalid API authentication
+        "429":
+          description: SNECB rate limit reached
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API-Key
+  schemas:
+    SubjectResult:
+      type: object
+      properties:
+        subject:
+          type: string
+        grade:
+          type: string
+    StudentResult:
+      type: object
+      required: [found, student_number]
+      properties:
+        found:
+          type: boolean
+        student_number:
+          type: string
+        name:
+          type: string
+          nullable: true
+        school:
+          type: string
+          nullable: true
+        level:
+          type: string
+          nullable: true
+        academic_year:
+          type: string
+          nullable: true
+        overall_grade:
+          type: string
+          nullable: true
+        status:
+          type: string
+          nullable: true
+        subjects:
+          type: array
+          items:
+            $ref: "#/components/schemas/SubjectResult"
+    ScanResult:
+      type: object
+      properties:
+        checked:
+          type: integer
+        found:
+          type: integer
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/StudentResult"
