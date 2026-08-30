@@ -1,6 +1,8 @@
 import os
 import re
 import time
+import csv
+import io
 from typing import Optional
 from urllib.parse import unquote
 
@@ -8,48 +10,46 @@ import requests
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 
 # ============================================================
-# CONFIGURATION
+# SNECB CONFIGURATION
 # ============================================================
 
 SNECB_BASE_URL = "https://www.slnecb.org"
 SNECB_RESULTS_URL = f"{SNECB_BASE_URL}/results"
 SNECB_SEARCH_URL = f"{SNECB_BASE_URL}/results/search"
 
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "20"))
+REQUEST_TIMEOUT = int(
+    os.getenv("REQUEST_TIMEOUT", "20")
+)
 
-# Delay between requests.
-# Keep this at 4 seconds to reduce the chance of hitting
-# SNECB's rate limit.
 REQUEST_DELAY_SECONDS = float(
     os.getenv("REQUEST_DELAY_SECONDS", "4")
 )
 
-# Maximum number of student IDs in one request.
-# 500 = A25S001/001 through A25S500/001.
+# Maximum IDs allowed in one request.
+# 500 means A25S001/001 -> A25S500/001
 MAX_SCAN_SIZE = int(
     os.getenv("MAX_SCAN_SIZE", "500")
 )
 
 # Optional API key.
-# Leave API_KEY empty in Render if you want to use
-# the endpoint without authentication.
 API_KEY = os.getenv("API_KEY", "")
 
 
 # ============================================================
-# FASTAPI
+# FASTAPI APPLICATION
 # ============================================================
 
 app = FastAPI(
-    title="SNECB School Finder API",
+    title="SNECB School CSV API",
     description=(
-        "Returns unique school names found in the "
-        "SNECB public results system."
+        "Finds school names from SNECB student numbers "
+        "and returns them as a CSV spreadsheet."
     ),
-    version="2.0.0",
+    version="3.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
@@ -66,19 +66,16 @@ app.add_middleware(
 
 
 # ============================================================
-# AUTHENTICATION
+# API KEY
 # ============================================================
 
 def check_api_key(
     authorization: Optional[str],
-) -> None:
-
+):
     if not API_KEY:
         return
 
-    expected = f"Bearer {API_KEY}"
-
-    if authorization != expected:
+    if authorization != f"Bearer {API_KEY}":
         raise HTTPException(
             status_code=401,
             detail="Invalid API authorization.",
@@ -108,7 +105,7 @@ def normalize_student_number(
 
 
 # ============================================================
-# EXTRACT CSRF TOKEN
+# CSRF TOKEN
 # ============================================================
 
 def extract_csrf(
@@ -122,7 +119,9 @@ def extract_csrf(
 
     meta = soup.find(
         "meta",
-        attrs={"name": "csrf-token"},
+        attrs={
+            "name": "csrf-token"
+        },
     )
 
     if meta:
@@ -188,12 +187,10 @@ def create_session():
 
 
 # ============================================================
-# LOOK UP ONE STUDENT
+# GET ONE SCHOOL
 #
-# IMPORTANT:
-# The SNECB server returns the complete student record
-# internally. We extract ONLY the school name and never
-# return the student record from our API.
+# SNECB returns a complete student record internally.
+# This function extracts ONLY the school name.
 # ============================================================
 
 def get_school(
@@ -231,10 +228,10 @@ def get_school(
         response = session.post(
             SNECB_SEARCH_URL,
             json={
-                "level": level,
                 "student_number": (
                     student_number.lower()
                 ),
+                "level": level,
             },
             headers=headers,
             timeout=REQUEST_TIMEOUT,
@@ -315,7 +312,7 @@ def get_school(
         )
 
     # --------------------------------------------------------
-    # OTHER HTTP ERROR
+    # OTHER ERROR
     # --------------------------------------------------------
 
     if response.status_code != 200:
@@ -329,7 +326,7 @@ def get_school(
         )
 
     # --------------------------------------------------------
-    # PARSE JSON
+    # JSON
     # --------------------------------------------------------
 
     try:
@@ -347,7 +344,7 @@ def get_school(
         )
 
     # --------------------------------------------------------
-    # EXTRACT STUDENT
+    # STUDENT
     # --------------------------------------------------------
 
     student = (
@@ -360,15 +357,19 @@ def get_school(
         return None
 
     # --------------------------------------------------------
-    # EXTRACT ONLY SCHOOL
+    # SCHOOL ONLY
     # --------------------------------------------------------
 
-    school = student.get("school")
+    school = student.get(
+        "school"
+    )
 
     if not school:
         return None
 
-    school = str(school).strip()
+    school = str(
+        school
+    ).strip()
 
     if not school:
         return None
@@ -384,13 +385,12 @@ def get_school(
 def root():
 
     return {
-        "service": "SNECB School Finder API",
+        "service": "SNECB School CSV API",
         "status": "online",
-        "version": "2.0.0",
-        "max_scan_size": MAX_SCAN_SIZE,
-        "request_delay_seconds": REQUEST_DELAY_SECONDS,
+        "version": "3.0.0",
         "endpoint": "/schools",
-        "docs": "/docs",
+        "format": "CSV",
+        "max_scan_size": MAX_SCAN_SIZE,
     }
 
 
@@ -407,53 +407,48 @@ def health():
 
 
 # ============================================================
-# SCHOOLS ONLY
+# SCHOOL CSV ENDPOINT
 # ============================================================
 
 @app.get(
     "/schools",
-    response_model=list[str],
-    operation_id="findSchoolNames",
+    operation_id="getSchoolsCSV",
+    responses={
+        200: {
+            "description": "CSV spreadsheet containing school names only.",
+            "content": {
+                "text/csv": {}
+            },
+        }
+    },
 )
 def schools(
 
     prefix: str = Query(
         "A25S",
-        description=(
-            "Student number prefix. "
-            "Example: A25S"
-        ),
+        description="Student number prefix. Example: A25S",
     ),
 
     start: int = Query(
         1,
         ge=1,
-        description=(
-            "First number to check."
-        ),
+        description="First student number.",
     ),
 
     end: int = Query(
         500,
         ge=1,
-        description=(
-            "Last number to check."
-        ),
+        description="Last student number.",
     ),
 
     suffix: str = Query(
         "/001",
-        description=(
-            "Student number suffix. "
-            "Example: /001"
-        ),
+        description="Student number suffix. Example: /001",
     ),
 
     level: str = Query(
         "",
-        description=(
-            "Optional SNECB level."
-        ),
+        description="Optional SNECB level.",
     ),
 
     authorization: Optional[str] = Header(
@@ -462,7 +457,7 @@ def schools(
 ):
 
     # --------------------------------------------------------
-    # CHECK AUTH
+    # AUTH
     # --------------------------------------------------------
 
     check_api_key(
@@ -493,13 +488,13 @@ def schools(
         )
 
     # --------------------------------------------------------
-    # UNIQUE SCHOOL NAMES
+    # SCHOOL SET
     # --------------------------------------------------------
 
     school_names = set()
 
     # --------------------------------------------------------
-    # CHECK STUDENT NUMBERS
+    # SCAN
     # --------------------------------------------------------
 
     for number in range(
@@ -527,12 +522,12 @@ def schools(
 
         except HTTPException as exc:
 
-            # Stop if SNECB rate-limits us.
+            # Stop immediately on SNECB rate limit.
             if exc.status_code == 429:
                 raise
 
-            # For other individual errors,
-            # continue with the next ID.
+            # Continue if one individual
+            # lookup fails.
             continue
 
         # ----------------------------------------------------
@@ -546,16 +541,59 @@ def schools(
             )
 
     # --------------------------------------------------------
-    # SORT SCHOOL NAMES
+    # SORT
     # --------------------------------------------------------
 
-    result = sorted(
+    schools_sorted = sorted(
         school_names,
-        key=lambda name: name.casefold(),
+        key=lambda x: x.casefold(),
     )
 
     # --------------------------------------------------------
-    # RETURN SCHOOL NAMES ONLY
+    # CREATE CSV
     # --------------------------------------------------------
 
-    return result
+    output = io.StringIO(
+        newline=""
+    )
+
+    writer = csv.writer(
+        output
+    )
+
+    # Header
+    writer.writerow(
+        ["School"]
+    )
+
+    # School names only
+    for school in schools_sorted:
+
+        writer.writerow(
+            [school]
+        )
+
+    # --------------------------------------------------------
+    # PREPARE FILE
+    # --------------------------------------------------------
+
+    csv_content = output.getvalue()
+
+    output.close()
+
+    filename = (
+        f"snecb_schools_"
+        f"{prefix}"
+        f"{start:03d}-"
+        f"{end:03d}.csv"
+    )
+
+    return StreamingResponse(
+        iter([csv_content]),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{filename}"'
+            )
+        },
+    )
